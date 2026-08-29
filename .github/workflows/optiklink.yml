@@ -66,7 +66,7 @@ jobs:
 
       - name: 🚀 运行保活脚本
         env:
-          DISCORD_ACCOUNT: ${{ secrets.DISCORD_ACCOUNT }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           PANEL_ACCOUNT: ${{ secrets.PANEL_ACCOUNT }}
           TG_BOT: ${{ secrets.TG_BOT }}
           NODE_LINK: ${{ secrets.NODE_LINK }}   # 必须传，config 靠它开 proxy
