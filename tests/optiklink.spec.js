@@ -2,7 +2,7 @@
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
 
-const [email, password] = (process.env.DISCORD_ACCOUNT || ',').split(',');
+const DISCORD_TOKEN = (process.env.DISCORD_TOKEN || process.env.DISCORD_ACCOUNT || '').trim().replace(/^["']|["']$/g, '');
 const [panelUser, panelPass] = (process.env.PANEL_ACCOUNT || ',').split(',');
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
@@ -62,17 +62,30 @@ function sendTG(result, serverName = 'OptikLink') {
     });
 }
 
-// 处理 Discord 登录页（填账密）
-async function handleDiscordLogin(page, email, password) {
-    await page.fill('input[name="email"]', email);
-    await page.fill('input[name="password"]', password);
-    await page.click('button[type="submit"]');
+// 通过 Token 注入登录 Discord
+async function loginDiscordWithToken(page, token) {
+    console.log('🔑 正在通过 Token 登录 Discord...');
+    await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(1000);
+
+    await page.evaluate((t) => {
+        setInterval(() => {
+            try {
+                const iframe = document.createElement('iframe');
+                document.body.appendChild(iframe);
+                iframe.contentWindow.localStorage.token = `"${t}"`;
+            } catch (e) {}
+        }, 50);
+        setTimeout(() => {
+            location.href = 'https://discord.com/channels/@me';
+        }, 1000);
+    }, token);
+
     try {
         await page.waitForURL(url => !url.toString().includes('discord.com/login'), { timeout: 15000 });
+        console.log('✅ Discord Token 登录成功！');
     } catch {
-        let err = '账密错误或触发了 2FA / 验证码';
-        try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
-        throw new Error(`❌ Discord 登录失败: ${err}`);
+        console.log('⚠️ 等待 Discord 重定向超时，继续尝试后续流程...');
     }
 }
 
@@ -114,11 +127,17 @@ async function handleOAuthPage(page) {
     }
 }
 
+// 辅助函数：判断服务器是否处于活跃/启动中状态
+function isServerAlive(status) {
+    const s = (status || '').toLowerCase();
+    return s.includes('online') || s.includes('running') || s.includes('starting');
+}
+
 test('OptikLink 保活', async ({ }, testInfo) => {
     const proxyUrl = '';
 
-    if (!email || !password) {
-        throw new Error('❌ 缺少账号配置，格式: DISCORD_ACCOUNT=email,password');
+    if (!DISCORD_TOKEN) {
+        throw new Error('❌ 缺少 Discord Token 配置，请在环境变量设置 DISCORD_TOKEN');
     }
 
     let proxyConfig = undefined;
@@ -246,57 +265,21 @@ test('OptikLink 保活', async ({ }, testInfo) => {
             console.log('⚠️ IP 验证超时，跳过');
         }
 
+        // 1. 预先通过 Token 登录 Discord
+        await loginDiscordWithToken(page, DISCORD_TOKEN);
+
         console.log('🔑 打开 OptikLink 登录页...');
         await page.goto('https://optiklink.com/auth', { waitUntil: 'domcontentloaded' });
 
         console.log('📤 点击 Login with Discord...');
         await page.click("a[href='login']");
 
-        console.log('⏳ 等待跳转 Discord 登录页...');
+        console.log('⏳ 等待跳转授权页或主页...');
         await page.waitForURL(url => !url.toString().includes('optiklink.com/auth'), { timeout: TIMEOUT });
 
-        const landedUrl = page.url();
-
-        if (landedUrl.includes('discord.com/login')) {
-            console.log('✏️ 填写账号密码...');
-            await page.fill('input[name="email"]', email);
-            await page.fill('input[name="password"]', password);
-            console.log('📤 提交登录请求...');
-            await page.click('button[type="submit"]');
-            try {
-                await page.waitForURL(url => !url.toString().includes('discord.com/login'), { timeout: 15000 });
-            } catch {
-                let err = '账密错误或触发了 2FA / 验证码';
-                try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
-                await sendTG(`❌ Discord 登录失败：${err}`);
-                throw new Error(`❌ Discord 登录失败: ${err}`);
-            }
-        } else if (landedUrl.includes('discord.com/oauth2')) {
-            // 检查按钮：Log In 说明没有登录态，需先登录
-            try {
-                const btn = await page.waitForSelector('button.primary_a22cb0', { timeout: 5000 });
-                const btnText = (await btn.innerText()).trim();
-                if (/log\s*in/i.test(btnText) || btnText.includes('登录')) {
-                    console.log('✏️ 填写账号密码...');
-                    await btn.click();
-                    await page.waitForURL(/discord\.com\/login/, { timeout: 10000 });
-                    await page.fill('input[name="email"]', email);
-                    await page.fill('input[name="password"]', password);
-                    console.log('📤 提交登录请求...');
-                    await page.click('button[type="submit"]');
-                    try {
-                        await page.waitForURL(url => !url.toString().includes('discord.com/login'), { timeout: 15000 });
-                    } catch {
-                        let err = '账密错误或触发了 2FA / 验证码';
-                        try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
-                        await sendTG(`❌ Discord 登录失败：${err}`);
-                        throw new Error(`❌ Discord 登录失败: ${err}`);
-                    }
-                }
-            } catch (e) {
-                if (e.message.includes('Discord 登录失败')) throw e;
-                // 找不到按钮说明已自动处理
-            }
+        // 若仍落在登录页，再次注入 Token
+        if (page.url().includes('discord.com/login')) {
+            await loginDiscordWithToken(page, DISCORD_TOKEN);
         }
 
         // 处理可能出现的 OAuth 授权页
@@ -304,44 +287,14 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         try {
             await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 6000 });
             console.log('🔍 进入 OAuth 授权页，处理中...');
-            console.log('  📄 当前在 Discord 授权页面');
             await handleOAuthPage(page);
             console.log('  ✨ 已授权，等待自动跳转...');
             try {
                 await page.waitForURL(/optiklink\.net/, { timeout: 15000 });
-                console.log('  ⏳ 跳转中，稍候...');
             } catch { /* 继续 */ }
             console.log(`✅ 已离开 Discord，当前：${page.url()}`);
         } catch (e) {
             if (e.message.includes('Discord 登录失败')) throw e;
-        }
-
-        // ✅ 修复：OAuth 授权后若被重定向回 discord.com/login，再次填写账密登录
-        if (page.url().includes('discord.com/login')) {
-            console.log('🔄 OAuth 后被重定向至登录页，再次填写账号密码...');
-            await page.fill('input[name="email"]', email);
-            await page.fill('input[name="password"]', password);
-            console.log('📤 提交登录请求...');
-            await page.click('button[type="submit"]');
-            try {
-                await page.waitForURL(url => !url.toString().includes('discord.com/login'), { timeout: 20000 });
-                console.log(`✅ 二次登录后跳转至：${page.url()}`);
-            } catch {
-                let err = '账密错误或触发了 2FA / 验证码';
-                try { err = await page.locator('[class*="errorMessage"]').first().innerText(); } catch {}
-                await sendTG(`❌ Discord 二次登录失败：${err}`);
-                throw new Error(`❌ Discord 二次登录失败: ${err}`);
-            }
-
-            // 二次登录后可能再次出现 OAuth 授权页
-            if (page.url().includes('discord.com/oauth2')) {
-                console.log('🔍 二次进入 OAuth 授权页，处理中...');
-                await handleOAuthPage(page);
-                try {
-                    await page.waitForURL(/optiklink\.net/, { timeout: 15000 });
-                } catch { /* 继续 */ }
-                console.log(`✅ OAuth 二次处理完成，当前：${page.url()}`);
-            }
         }
 
         console.log('⏳ 确认到达 OptikLink...');
@@ -359,8 +312,6 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         await page.waitForTimeout(2000);
 
         console.log('📤 点击 Panel Login...');
-
-        // 最佳实践：通过 Role 和文本定位按钮，并显式等待其完全可见
         const panelLoginBtn = page.getByRole('button', { name: 'Panel Login' });
         await panelLoginBtn.waitFor({ state: 'visible' });
 
@@ -377,7 +328,6 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         const currentUrl = panelPage.url();
         console.log(`✅ 已到达控制台页面：${currentUrl}`);
 
-        // 修复点2：判断当前是否真的在登录页，如果在首页说明已经自动登录了
         if (currentUrl.includes('/auth/login')) {
             console.log('✏️ 填写控制台账号密码...');
             await panelPage.fill('input[name="username"]', panelUser);
@@ -393,7 +343,6 @@ test('OptikLink 保活', async ({ }, testInfo) => {
             await panelPage.click('button[type="submit"]');
 
             console.log('⏳ 确认到达控制台首页...');
-            // 这里同样加上 waitUntil: 'domcontentloaded'
             await panelPage.waitForURL(url => !url.toString().includes('/auth/login'), { timeout: TIMEOUT, waitUntil: 'domcontentloaded' });
             console.log(`✅ 控制台登录成功！当前：${panelPage.url()}`);
         } else {
@@ -426,47 +375,51 @@ test('OptikLink 保活', async ({ }, testInfo) => {
         console.log('🔍 检查服务器状态...');
         await serverPage.waitForTimeout(3000);
 
-        // 若服务器处于 CONNECTING / STARTING 等中间态，等待稳定
         let statusText = '';
         for (let i = 0; i < 12; i++) {
             statusText = await serverPage.locator('p.sc-168cvuh-1').innerText().catch(() => '');
             const s = statusText.toLowerCase();
-            if (s.includes('running') || s.includes('offline') || s.includes('stopped')) break;
+            // 只要匹配 online, running, starting, offline, stopped 即跳出等待
+            if (isServerAlive(s) || s.includes('offline') || s.includes('stopped')) break;
             console.log(`  🔄 等待状态稳定（${statusText.trim()}）...`);
             await serverPage.waitForTimeout(5000);
         }
 
-        console.log(`💻 服务器状态：${statusText.trim()}`);
+        const currentStatus = statusText.trim();
+        console.log(`💻 服务器状态：${currentStatus}`);
 
-        if (statusText.toLowerCase().includes('running')) {
+        // 状态检查：starting, online, running 均算保活成功
+        if (isServerAlive(currentStatus)) {
             console.log('🎉 保活成功！');
-            await sendTG('✅ 保活成功！\n💻 服务器状态：🚀 Running', serverInfo.name);
-        } else if (statusText.toLowerCase().includes('offline') || statusText.toLowerCase().includes('stopped')) {
+            await sendTG(`✅ 保活成功！\n💻 服务器状态：🚀 ${currentStatus}`, serverInfo.name);
+        } else if (currentStatus.toLowerCase().includes('offline') || currentStatus.toLowerCase().includes('stopped')) {
             console.log('⚠️ 服务器离线，尝试启动...');
             await serverPage.click('button:has-text("Start")');
             console.log('📤 已点击 Start，持续监控状态...');
 
             let started = false;
+            let finalStatus = '';
             for (let i = 0; i < 24; i++) {
                 await serverPage.waitForTimeout(5000);
                 const s = await serverPage.locator('p.sc-168cvuh-1').innerText().catch(() => '');
-                console.log(`  🔄 第 ${i + 1} 次检查，状态：${s.trim()}`);
-                if (s.toLowerCase().includes('running')) {
+                finalStatus = s.trim();
+                console.log(`  🔄 第 ${i + 1} 次检查，状态：${finalStatus}`);
+                if (isServerAlive(finalStatus)) {
                     started = true;
                     break;
                 }
             }
 
             if (started) {
-                console.log('✅ 服务器已成功启动！');
-                await sendTG('🔄 Start 启动！\n💻 服务器状态：🚀 Running', serverInfo.name);
+                console.log(`✅ 服务器已成功启动/正在启动！状态：${finalStatus}`);
+                await sendTG(`🔄 Start 启动成功！\n💻 服务器状态：🚀 ${finalStatus}`, serverInfo.name);
             } else {
                 console.log('❌ 等待超时，服务器未能启动');
                 await sendTG('❌ Start 启动失败，等待超时\n💻 服务器状态：💤 Offline', serverInfo.name);
             }
         } else {
-            console.log(`⚠️ 未知状态：${statusText.trim()}`);
-            await sendTG(`⚠️ 状态未知\n💻 服务器状态：❓ ${statusText.trim()}`, serverInfo.name);
+            console.log(`⚠️ 未知状态：${currentStatus}`);
+            await sendTG(`⚠️ 状态未知\n💻 服务器状态：❓ ${currentStatus}`, serverInfo.name);
         }
 
     } catch (e) {
